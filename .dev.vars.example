@@ -1,0 +1,4 @@
+LINE_CHANNEL_SECRET=ここにチャネルシークレット
+LINE_CHANNEL_ACCESS_TOKEN=ここにチャネルアクセストークン
+SOURCE_GROUP_ID=依頼を拾う業務連絡グループID
+NOTIFY_GROUP_ID=通知と操作を行うやることリストグループID

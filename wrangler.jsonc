@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gyomu-assistant-bot",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-06-24",
+  "triggers": {
+    "crons": [
+      "0 20 * * *",
+      "0 2 * * *",
+      "0 7 * * *"
+    ]
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "gyomu-assistant-tasks",
+      "database_id": "ea401aec-5640-42ec-a74b-e5e9abe573d6"
+    }
+  ]
+}
