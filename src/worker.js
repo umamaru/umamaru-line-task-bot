@@ -79,7 +79,7 @@ async function handleEvent(event, env) {
       await replyText(
         env,
         event.replyToken,
-        "やることリスト用の通知グループです。\n\n業務連絡グループで拾った依頼をここへ通知します。\n未完了一覧、完了、誤登録、必要な時だけ完了報告ができます。"
+        "やることリスト用の通知グループです。\n\n業務連絡グループで拾った依頼をここへ通知します。\n未完了一覧、完了、消す、必要な時だけ完了報告ができます。"
       );
     }
     return;
@@ -626,10 +626,10 @@ function buildCompactTaskReceipt(id, taskText) {
     text: `📌 新しい依頼を拾いました\n\n${taskText}`,
     quickReply: {
       items: [
-        quickPostback("誤登録", "cancel", id),
+        quickPostback("消す", "cancel", id),
         quickPostback("完了", "done", id),
-        quickPostback("報告完了", "report_done", id),
-        quickPostback("コメント報告", "report_comment", id),
+        quickPostback("報告", "report_done", id),
+        quickPostback("コメ報", "report_comment", id),
       ],
     },
   };
@@ -675,13 +675,27 @@ function buildTaskFlex(task, headerText = null) {
       },
       footer: {
         type: "box",
-        layout: "horizontal",
+        layout: "vertical",
         spacing: "sm",
         contents: [
-          actionButton("誤登録", "cancel", task.id, "secondary"),
-          actionButton("完了", "done", task.id, "primary"),
-          actionButton("報告完了", "report_done", task.id, "primary"),
-          actionButton("コメント報告", "report_comment", task.id, "secondary"),
+          {
+            type: "box",
+            layout: "horizontal",
+            spacing: "sm",
+            contents: [
+              actionButton("消す", "cancel", task.id, "secondary"),
+              actionButton("完了", "done", task.id, "primary"),
+            ],
+          },
+          {
+            type: "box",
+            layout: "horizontal",
+            spacing: "sm",
+            contents: [
+              actionButton("報告", "report_done", task.id, "primary"),
+              actionButton("コメ報", "report_comment", task.id, "secondary"),
+            ],
+          },
         ],
       },
     },
