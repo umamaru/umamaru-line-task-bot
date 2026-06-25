@@ -91,6 +91,8 @@ async function handleEvent(event, env) {
       env,
       env.DB,
       route.taskGroupId,
+      groupId,
+      event.source?.userId || null,
       event.postback.data
     );
     await replyMessages(env, event.replyToken, response);
@@ -102,6 +104,22 @@ async function handleEvent(event, env) {
   }
 
   const text = event.message.text.trim();
+
+  if (route.isNotifyGroup) {
+    const pendingResponse = await consumePendingAction(
+      env,
+      env.DB,
+      groupId,
+      route.taskGroupId,
+      event.source?.userId || null,
+      text
+    );
+
+    if (pendingResponse) {
+      await replyText(env, event.replyToken, pendingResponse);
+      return;
+    }
+  }
 
   if (text === "AI確認") {
     if (!route.isNotifyGroup) return;
@@ -165,7 +183,7 @@ async function handleEvent(event, env) {
     )
     .first();
 
-  const receipt = buildCompactTaskReceipt(result.id, task.title);
+  const receipt = buildCompactTaskReceipt(result.id, displayTaskText(task));
   if (route.notifyGroupId && route.notifyGroupId !== groupId) {
     await pushMessages(env, route.notifyGroupId, [receipt]);
     return;
@@ -244,7 +262,7 @@ export function parseTaskMessage(text) {
   }
 
   if (!title) return null;
-  if (extra.length) note = [note, ...extra].filter(Boolean).join(" / ");
+  if (extra.length) note = [note, ...extra].filter(Boolean).join("\n");
 
   return { kind, title, dueText, note };
 }
@@ -365,7 +383,7 @@ CHATの例:
       kind: "request",
       title: lines[0],
       dueText: null,
-      note: lines.length > 1 ? lines.slice(1).join(" / ") : null,
+      note: lines.length > 1 ? lines.slice(1).join("\n") : null,
     };
   } catch (error) {
     console.error("Workers AI classification failed", error);
@@ -415,7 +433,7 @@ export function parseCommand(text) {
 
 async function executeCommand(db, groupId, command) {
   const task = await db
-    .prepare("SELECT id, title, status FROM tasks WHERE id = ? AND group_id = ?")
+    .prepare("SELECT id, title, note, status FROM tasks WHERE id = ? AND group_id = ?")
     .bind(command.id, groupId)
     .first();
 
@@ -430,13 +448,13 @@ async function executeCommand(db, groupId, command) {
       )
       .bind(command.id, groupId)
       .run();
-    return `完了 ${formatTaskId(command.id)}\n${task.title}`;
+    return `完了 ${formatTaskId(command.id)}\n${displayTaskText(task)}`;
   }
 
   return "操作を確認できませんでした。";
 }
 
-async function executePostback(env, db, groupId, data) {
+async function executePostback(env, db, groupId, notifyGroupId, userId, data) {
   const params = new URLSearchParams(data);
   const action = params.get("action");
   const id = Number(params.get("id"));
@@ -446,7 +464,7 @@ async function executePostback(env, db, groupId, data) {
   }
 
   const task = await db
-    .prepare("SELECT id, title, status FROM tasks WHERE id = ? AND group_id = ?")
+    .prepare("SELECT id, title, note, status FROM tasks WHERE id = ? AND group_id = ?")
     .bind(id, groupId)
     .first();
 
@@ -463,7 +481,7 @@ async function executePostback(env, db, groupId, data) {
       )
       .bind(id, groupId)
       .run();
-    return [{ type: "text", text: `✅ 完了にしました\n${task.title}` }];
+    return [{ type: "text", text: `✅ 完了にしました\n${displayTaskText(task)}` }];
   }
 
   if (action === "report_done") {
@@ -478,11 +496,37 @@ async function executePostback(env, db, groupId, data) {
 
     const sourceGroupId = env.SOURCE_GROUP_ID?.trim();
     if (sourceGroupId) {
-      await pushMessages(env, sourceGroupId, [buildCompletionReport(task.title)]);
-      return [{ type: "text", text: `✅ 完了にして、業務連絡グループへ報告しました\n${task.title}` }];
+      await pushMessages(env, sourceGroupId, [buildCompletionReport(displayTaskText(task))]);
+      return [{ type: "text", text: `✅ 完了にして、業務連絡グループへ報告しました\n${displayTaskText(task)}` }];
     }
 
-    return [{ type: "text", text: `✅ 完了にしました\n${task.title}` }];
+    return [{ type: "text", text: `✅ 完了にしました\n${displayTaskText(task)}` }];
+  }
+
+  if (action === "report_comment") {
+    if (!userId) {
+      return [{ type: "text", text: "コメント入力を開始できませんでした。もう一度お試しください。" }];
+    }
+
+    await db
+      .prepare(
+        `INSERT INTO pending_actions (group_id, user_id, task_group_id, task_id, action_type, created_at)
+         VALUES (?, ?, ?, ?, 'report_comment', datetime('now'))
+         ON CONFLICT(group_id, user_id) DO UPDATE SET
+           task_group_id = excluded.task_group_id,
+           task_id = excluded.task_id,
+           action_type = excluded.action_type,
+           created_at = excluded.created_at`
+      )
+      .bind(notifyGroupId, userId, groupId, id)
+      .run();
+
+    return [
+      {
+        type: "text",
+        text: `📝 報告コメントを入力してください\n\n対象:\n${displayTaskText(task)}\n\n例: 明日納品で依頼済み\nやめる場合は「キャンセル」と送ってください。`,
+      },
+    ];
   }
 
   if (action === "cancel") {
@@ -490,10 +534,77 @@ async function executePostback(env, db, groupId, data) {
       .prepare("DELETE FROM tasks WHERE id = ? AND group_id = ?")
       .bind(id, groupId)
       .run();
-    return [{ type: "text", text: `🗑️ 誤登録として取り消しました\n${task.title}` }];
+    return [{ type: "text", text: `🗑️ 誤登録として取り消しました\n${displayTaskText(task)}` }];
   }
 
   return [{ type: "text", text: "操作を確認できませんでした。" }];
+}
+
+async function consumePendingAction(env, db, notifyGroupId, taskGroupId, userId, text) {
+  if (!userId) return null;
+
+  const pending = await db
+    .prepare(
+      `SELECT task_group_id, task_id, action_type
+       FROM pending_actions
+       WHERE group_id = ? AND user_id = ?
+         AND created_at >= datetime('now', '-30 minutes')`
+    )
+    .bind(notifyGroupId, userId)
+    .first();
+
+  if (!pending) {
+    await db
+      .prepare(
+        `DELETE FROM pending_actions
+         WHERE group_id = ? AND user_id = ?
+           AND created_at < datetime('now', '-30 minutes')`
+      )
+      .bind(notifyGroupId, userId)
+      .run();
+    return null;
+  }
+
+  await db
+    .prepare("DELETE FROM pending_actions WHERE group_id = ? AND user_id = ?")
+    .bind(notifyGroupId, userId)
+    .run();
+
+  if (text === "キャンセル") {
+    return "報告コメント付き完了をキャンセルしました。タスクは未完了のままです。";
+  }
+
+  if (pending.action_type !== "report_comment") {
+    return "入力待ちの操作を確認できませんでした。";
+  }
+
+  const sourceGroupId = env.SOURCE_GROUP_ID?.trim();
+  if (!sourceGroupId) {
+    return "業務連絡グループが設定されていないため、報告できませんでした。";
+  }
+
+  const task = await db
+    .prepare("SELECT id, title, note FROM tasks WHERE id = ? AND group_id = ?")
+    .bind(pending.task_id, pending.task_group_id || taskGroupId)
+    .first();
+
+  if (!task) return "コメント先のタスクが見つかりませんでした。";
+
+  const comment = text.slice(0, 500);
+  await db
+    .prepare(
+      `UPDATE tasks
+       SET status = 'done', completed_at = datetime('now'), updated_at = datetime('now')
+       WHERE id = ? AND group_id = ?`
+    )
+    .bind(pending.task_id, pending.task_group_id || taskGroupId)
+    .run();
+
+  await pushMessages(env, sourceGroupId, [
+    buildCompletionReport(displayTaskText(task), comment),
+  ]);
+
+  return `✅ コメント付きで完了報告しました\n${displayTaskText(task)}\n\nコメント:\n${comment}`;
 }
 
 async function getOpenTasks(db, groupId) {
@@ -509,15 +620,16 @@ async function getOpenTasks(db, groupId) {
   return result.results || [];
 }
 
-function buildCompactTaskReceipt(id, title) {
+function buildCompactTaskReceipt(id, taskText) {
   return {
     type: "text",
-    text: `📌 新しい依頼を拾いました\n\n${title}`,
+    text: `📌 新しい依頼を拾いました\n\n${taskText}`,
     quickReply: {
       items: [
         quickPostback("誤登録", "cancel", id),
         quickPostback("完了", "done", id),
         quickPostback("報告完了", "report_done", id),
+        quickPostback("コメント報告", "report_comment", id),
       ],
     },
   };
@@ -537,7 +649,7 @@ function quickPostback(label, action, id) {
 function buildTaskFlex(task, headerText = null) {
   return {
     type: "flex",
-    altText: `業務依頼: ${task.title}`,
+    altText: `業務依頼: ${displayTaskText(task)}`,
     contents: {
       type: "bubble",
       header: {
@@ -558,7 +670,7 @@ function buildTaskFlex(task, headerText = null) {
         layout: "vertical",
         spacing: "md",
         contents: [
-          { type: "text", text: task.title, weight: "bold", size: "lg", wrap: true },
+          { type: "text", text: displayTaskText(task), weight: "bold", size: "lg", wrap: true },
         ],
       },
       footer: {
@@ -569,6 +681,7 @@ function buildTaskFlex(task, headerText = null) {
           actionButton("誤登録", "cancel", task.id, "secondary"),
           actionButton("完了", "done", task.id, "primary"),
           actionButton("報告完了", "report_done", task.id, "primary"),
+          actionButton("コメント報告", "report_comment", task.id, "secondary"),
         ],
       },
     },
@@ -590,11 +703,15 @@ function buildTaskListFlex(tasks) {
   };
 }
 
-function buildCompletionReport(title) {
+function buildCompletionReport(taskText, comment = null) {
   return {
     type: "text",
-    text: `✅ 完了しました\n\n${title}`,
+    text: `✅ 完了しました\n\n${taskText}${comment ? `\n\nコメント:\n${comment}` : ""}`,
   };
+}
+
+function displayTaskText(task) {
+  return [task.title, task.note].filter(Boolean).join("\n");
 }
 
 function actionButton(label, action, id, style, height = "sm") {
